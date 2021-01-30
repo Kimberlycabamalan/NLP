@@ -1,0 +1,6 @@
+We’ve trained a large-scale unsupervised language mode
+which generates coherent paragraphs of text, achieve
+state-of-the-art performance on many language modelin
+benchmarks, and performs rudimentary reading comprehension
+machine translation, question answering, an
+summarization—all without task-specific training
