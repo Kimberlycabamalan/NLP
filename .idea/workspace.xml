@@ -2,7 +2,14 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="4971d243-613c-4372-bbde-49a1aaac4e37" name="Default Changelist" comment="">
+      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/Project_Default.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/pred.txt" beforeDir="false" afterPath="$PROJECT_DIR$/pred.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/RNN Notebook.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/src/RNN Notebook.ipynb" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/myprogram.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/myprogram.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/pred.txt" beforeDir="false" afterPath="$PROJECT_DIR$/src/pred.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/rnn.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/rnn.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/work/model.checkpoint" beforeDir="false" afterPath="$PROJECT_DIR$/work/model.checkpoint" afterDir="false" />
     </list>
     <option name="EXCLUDED_CONVERTED_TO_IGNORED" value="true" />
     <option name="SHOW_DIALOG" value="false" />
@@ -16,6 +23,7 @@
   <component name="ProjectId" id="1nlywLE6aj71FoQUrzaNG4oxHJY" />
   <component name="PropertiesComponent">
     <property name="ASKED_ADD_EXTERNAL_FILES" value="true" />
+    <property name="SHARE_PROJECT_CONFIGURATION_FILES" value="true" />
     <property name="last_opened_file_path" value="$PROJECT_DIR$/src" />
     <property name="project.structure.last.edited" value="Project" />
     <property name="project.structure.proportion" value="0.0" />
@@ -60,7 +68,9 @@
       <map>
         <entry key="MAIN">
           <value>
-            <State />
+            <State>
+              <option name="COLUMN_ORDER" />
+            </State>
           </value>
         </entry>
       </map>
