@@ -10,7 +10,8 @@ class MyModel:
     This is a starter model to get you started. Feel free to modify this file.
     """
 
-    def load_training_data(train_data):
+    @classmethod
+    def load_training_data(cls, train_data):
         data = open(args.train_data, 'r').read()
         chars = list(set(data))
         data_size, vocab_size = len(data), len(chars)
@@ -19,7 +20,8 @@ class MyModel:
 
         return data, chars, data_size, vocab_size, char_to_ix, ix_to_char
 
-    def load_test_data(fname):
+    @classmethod
+    def load_test_data(cls, fname):
         data = []
         with open(fname) as f:
             for line in f:
@@ -27,7 +29,7 @@ class MyModel:
                 data.append(inp)
         return data
 
-    def run_train(data, chars, data_size, vocab_size, char_to_ix, ix_to_char, Wxh, Whh, Why, bh, by):
+    def run_train(self, data, chars, data_size, vocab_size, char_to_ix, ix_to_char, Wxh, Whh, Why, bh, by):
         n, p = 0, 0
         mWxh, mWhh, mWhy = np.zeros_like(Wxh), np.zeros_like(Whh), np.zeros_like(Why)
         mbh, mby = np.zeros_like(bh), np.zeros_like(by) # memory variables for Adagrad
@@ -41,7 +43,7 @@ class MyModel:
             targets = [char_to_ix[ch] for ch in data[p+1:p+seq_length+1]]
 
             # forward seq_length characters through the net and fetch gradient
-            loss, dWxh, dWhh, dWhy, dbh, dby, hprev = MyModel.lossFun(inputs, targets, vocab_size, Wxh, Whh, Why, bh, by, hprev)
+            loss, dWxh, dWhh, dWhy, dbh, dby, hprev = self.lossFun(inputs, targets, vocab_size, Wxh, Whh, Why, bh, by, hprev)
             smooth_loss = smooth_loss * 0.999 + loss * 0.001
 
             # perform parameter update with Adagrad
@@ -54,7 +56,7 @@ class MyModel:
 
         return hprev
 
-    def lossFun(inputs, targets, vocab_size, Wxh, Whh, Why, bh, by, hprev):
+    def lossFun(self, inputs, targets, vocab_size, Wxh, Whh, Why, bh, by, hprev):
         """
         inputs,targets are both list of integers.
         hprev is Hx1 array of initial hidden state
@@ -90,7 +92,7 @@ class MyModel:
             np.clip(dparam, -5, 5, out=dparam) # clip to mitigate exploding gradients
         return loss, dWxh, dWhh, dWhy, dbh, dby, hs[len(inputs)-1]
 
-    def sample(h, seed_ix, n):
+    def sample(self, h, seed_ix, n):
         """
         sample a sequence of integers from the model
         h is memory state, seed_ix is seed letter for first time step
@@ -108,7 +110,7 @@ class MyModel:
             ixes.append(ix)
         return ixes
 
-    def sample_top3(h, seed_ix, vocab_size, Wxh, Whh, Why, bh, by):
+    def sample_top3(self, h, seed_ix, vocab_size, Wxh, Whh, Why, bh, by):
         """
         output the top3 probable next letters
         h is memory state, seed_ix is seed letter
@@ -122,7 +124,7 @@ class MyModel:
         ixes = np.random.choice(range(vocab_size),3 , p=p.ravel())
         return ixes
 
-    def save(work_dir, hprev, char_to_ix, ix_to_char, vocab_size, Wxh, Whh, Why, bh, by):
+    def save(self, work_dir, hprev, char_to_ix, ix_to_char, vocab_size, Wxh, Whh, Why, bh, by):
 
         with open(os.path.join(work_dir, 'model.checkpoint.hprev'), 'wt') as f:
             for val in hprev:
@@ -159,27 +161,31 @@ class MyModel:
             for val in by:
                 f.write(str(val[0]) + "\n")
 
-    def write_pred(preds, fname):
+    @classmethod
+    def write_pred(cls, preds, fname):
         with open(fname, 'wt') as f:
             for p in preds:
                 f.write('{}\n'.format(p))
 
 
-    def run_pred(data, hprev, char_to_ix, ix_to_char, vocab_size, Wxh, Whh, Why, bh, by):
+    def run_pred(self, data, hprev, char_to_ix, ix_to_char, vocab_size, Wxh, Whh, Why, bh, by):
         # your code here
         preds = []
         for line in data:
             line = line.split()
-            char = list(line[len(line)-1])
-            i = char[len(char)-1] #get last character of input line
-            sample_ix = MyModel.sample_top3(hprev, char_to_ix[i], vocab_size, Wxh, Whh, Why, bh, by)
-            txt = ''.join(ix_to_char[ix] for ix in sample_ix)
+            if len(line) < 1:
+                preds.append("\n")
+            else:
+                char = list(line[len(line)-1])
+                i = char[len(char)-1] #get last character of input line
+                sample_ix = self.sample_top3(hprev, char_to_ix[i], vocab_size, Wxh, Whh, Why, bh, by)
+                txt = ''.join(ix_to_char[ix] for ix in sample_ix)
 
-            preds.append(txt)
+                preds.append(txt)
         return preds
 
-
-    def load(work_dir):
+    @classmethod
+    def load(cls, work_dir):
         with open(os.path.join(work_dir, 'model.checkpoint.hprev')) as f:
             print("loading hprev")
             values = []
@@ -281,27 +287,26 @@ if __name__ == '__main__':
         by = np.zeros((vocab_size, 1)) # output bias
 
         print('Training')
-        hprev = MyModel.run_train(data, chars, data_size, vocab_size, char_to_ix, ix_to_char, Wxh, Whh, Why, bh, by)
+        hprev = model.run_train(data, chars, data_size, vocab_size, char_to_ix, ix_to_char, Wxh, Whh, Why, bh, by)
 
         print('Saving model')
-        MyModel.save(args.work_dir, hprev, char_to_ix, ix_to_char, vocab_size, Wxh, Whh, Why, bh, by)
+        model.save(args.work_dir, hprev, char_to_ix, ix_to_char, vocab_size, Wxh, Whh, Why, bh, by)
 
     elif args.mode == 'test':
         print('Loading model')
+        model = MyModel()
         hprev, char_to_ix, ix_to_char, vocab_size, Wxh, Whh, Why, bh, by = MyModel.load(args.work_dir)
 
         print('Loading test data from {}'.format(args.test_data))
         test_data = MyModel.load_test_data(args.test_data)
 
         print('Making predictions')
-        pred = MyModel.run_pred(test_data, hprev, char_to_ix, ix_to_char, vocab_size, Wxh, Whh, Why, bh, by)
+        pred = model.run_pred(test_data, hprev, char_to_ix, ix_to_char, vocab_size, Wxh, Whh, Why, bh, by)
 
         print('Writing predictions to {}'.format(args.test_output))
         assert len(pred) == len(test_data), 'Expected {} predictions but got {}'.format(len(test_data), len(pred))
-
         print(pred)
-        MyModel.write_pred(pred, args.test_output)
-
+        model.write_pred(pred, args.test_output)
 
     else:
         raise NotImplementedError('Unknown mode {}'.format(args.mode))
