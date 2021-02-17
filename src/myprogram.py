@@ -167,6 +167,8 @@ class MyModel:
     def write_pred(cls, preds, fname):
         with open(fname, 'wt') as f:
             for p in preds:
+                p = p.replace("\n", "")
+                print(p)
                 f.write('{}\n'.format(p))
 
 
