@@ -17,6 +17,8 @@ class MyModel:
         data_size, vocab_size = len(data), len(chars)
         char_to_ix = { ch:i for i,ch in enumerate(chars) }
         ix_to_char = { i:ch for i,ch in enumerate(chars) }
+        char_to_ix["<unk>"] = len(char_to_ix)
+        ix_to_char[char_to_ix["<unk>"]] = "<unk>"
 
         return data, chars, data_size, vocab_size, char_to_ix, ix_to_char
 
@@ -178,9 +180,12 @@ class MyModel:
             else:
                 char = list(line[len(line)-1])
                 i = char[len(char)-1] #get last character of input line
-                sample_ix = self.sample_top3(hprev, char_to_ix[i], vocab_size, Wxh, Whh, Why, bh, by)
-                txt = ''.join(ix_to_char[ix] for ix in sample_ix)
 
+                if i in char_to_ix:
+                    sample_ix = self.sample_top3(hprev, char_to_ix[i], vocab_size, Wxh, Whh, Why, bh, by)
+                    txt = ''.join(ix_to_char[ix] for ix in sample_ix)
+                else:
+                    txt = "<unk>"
                 preds.append(txt)
         return preds
 
