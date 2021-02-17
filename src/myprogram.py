@@ -34,7 +34,7 @@ class MyModel:
         mWxh, mWhh, mWhy = np.zeros_like(Wxh), np.zeros_like(Whh), np.zeros_like(Why)
         mbh, mby = np.zeros_like(bh), np.zeros_like(by) # memory variables for Adagrad
         smooth_loss = -np.log(1.0/vocab_size)*seq_length # loss at iteration 0
-        while n<=1000: # 100000
+        while n<=10000:
             # prepare inputs (we're sweeping from left to right in steps seq_length long)
             if p+seq_length+1 >= len(data) or n == 0:
                 hprev = np.zeros((hidden_size,1)) # reset RNN memory
@@ -174,7 +174,7 @@ class MyModel:
         for line in data:
             line = line.split()
             if len(line) < 1:
-                preds.append("\n")
+                preds.append("")
             else:
                 char = list(line[len(line)-1])
                 i = char[len(char)-1] #get last character of input line
@@ -275,8 +275,8 @@ if __name__ == '__main__':
         data, chars, data_size, vocab_size, char_to_ix, ix_to_char = MyModel.load_training_data(args.train_data)
 
         # hyperparameters
-        hidden_size = 128 # size of hidden layer of neurons
-        seq_length = 32 # number of steps to unroll the RNN for
+        hidden_size = 512 # size of hidden layer of neurons
+        seq_length = 64 # number of steps to unroll the RNN for
         learning_rate = 1e-1
 
         # model parameters
