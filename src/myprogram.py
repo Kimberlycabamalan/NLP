@@ -114,23 +114,25 @@ def save(vocab, chars_from_ids, work_dir):
     with open(os.path.join(work_dir, 'model.checkpoint.vocab'), 'wt') as f:
         for val in vocab:
             f.write(val + "\n")
-        f.write(len(vocab))
+        f.write(str(len(vocab)))
 
 def load(work_dir):
     data = []
     with open(os.path.join(work_dir, 'model.checkpoint.vocab')) as f:
-        f = list(line)
+        f = list(f)
+        lines = list(f)
         for line in f[:-1]:
-            line = line.split()  # the last character is a newline
             data.append(line[0])
         vocab_size = f[-1]
+        print(vocab_size)
+        print(len(data))
     return data, vocab_size
 
 if __name__ == '__main__':
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
     parser.add_argument('mode', choices=('train', 'test'), help='what to run')
     parser.add_argument('--work_dir', help='where to save', default='work')
-    parser.add_argument('--train_data', help='path to train data', default='data/training.txt')
+    parser.add_argument('--train_data', help='path to train data', default='example/input.txt')
     parser.add_argument('--test_data', help='path to test data', default='example/input.txt')
     parser.add_argument('--test_output', help='path to write test predictions', default='pred.txt')
     args = parser.parse_args()
@@ -153,7 +155,7 @@ if __name__ == '__main__':
         # The unique characters in the file
         vocab = sorted(set(text))
         vocab.remove("\n")
-        vocab.remove(" ")
+        # vocab.remove(" ")
         print('{} unique characters'.format(len(vocab)))
 
         # Length of the vocabulary in chars
@@ -222,10 +224,15 @@ if __name__ == '__main__':
             filepath=checkpoint_prefix,
             save_weights_only=True)
 
-        EPOCHS = 1
+        EPOCHS = 35
         history = model.fit(dataset, epochs=EPOCHS, callbacks=[checkpoint_callback])
 
         save(vocab, chars_from_ids, args.work_dir)
+
+        # Save the weights
+        model.save_weights(checkpoint_dir)
+
+
         '''
         vocab:
         vocab
@@ -261,11 +268,14 @@ if __name__ == '__main__':
 
         loss = tf.losses.SparseCategoricalCrossentropy(from_logits=True)
         model.compile(optimizer='adam', loss=loss)
+        model.built = True
 
-        checkpoint_path = "training_checkpoints"
+        checkpoint_path = "./training_checkpoints"
         model.load_weights(checkpoint_path)
         one_step_model = OneStep(model, chars_from_ids, ids_from_chars)
 
+        start = time.time()
+        states = None
         test_data = load_test_data('example/input.txt')
         pred = []
         next_char = tf.constant(test_data)
@@ -285,9 +295,16 @@ if __name__ == '__main__':
         for i in range(0, len(test_data)):
             next_char_3 = first_char[i].numpy().decode('utf-8') + second_choice[i].numpy().decode('utf-8') + third_choice[i].numpy().decode('utf-8')
             pred.append(next_char_3)
-        write_pred(pred, 'output.txt')
+
         end = time.time()
+
+        # print(result[0].numpy().decode('utf-8'), '\n\n' + '_'*80)
+        # print(second_result[0].numpy().decode('utf-8'), '\n\n' + '_'*80)
+        # print(third_result[0].numpy().decode('utf-8'), '\n\n' + '_'*80)
+
         print(f"\nRun time: {end - start}")
+        write_pred(pred, 'output.txt')
+
         '''
         print('Loading model')
         model = MyModel()
