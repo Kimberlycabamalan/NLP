@@ -1,269 +1,136 @@
 #!/usr/bin/env python
-import os
-import string
-import random
+# coding: utf8
+import tensorflow as tf
+from tensorflow.keras.layers.experimental import preprocessing
+
 import numpy as np
+import random
+import os
+import time
+
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 
-class MyModel:
-    """
-    This is a starter model to get you started. Feel free to modify this file.
-    """
+class MyModel(tf.keras.Model):
+    def __init__(self, vocab_size, embedding_dim, rnn_units):
+        super().__init__(self)
+        self.embedding = tf.keras.layers.Embedding(vocab_size, embedding_dim)
+        self.gru = tf.keras.layers.GRU(rnn_units,
+                                       return_sequences=True,
+                                       return_state=True)
+        self.dense = tf.keras.layers.Dense(vocab_size)
 
-    @classmethod
-    def load_training_data(cls, train_data):
-        data = open(args.train_data, 'r').read()
-        chars = list(set(data))
-        data_size, vocab_size = len(data), len(chars)
-        char_to_ix = { ch:i for i,ch in enumerate(chars) }
-        ix_to_char = { i:ch for i,ch in enumerate(chars) }
-        char_to_ix["<unk>"] = len(char_to_ix)
-        ix_to_char[char_to_ix["<unk>"]] = "<unk>"
+    def call(self, inputs, states=None, return_state=False, training=False):
+        x = inputs
+        x = self.embedding(x, training=training)
+        if states is None:
+            states = self.gru.get_initial_state(x)
+        x, states = self.gru(x, initial_state=states, training=training)
+        x = self.dense(x, training=training)
 
-        return data, chars, data_size, vocab_size, char_to_ix, ix_to_char
+        if return_state:
+            return x, states
+        else:
+            return x
 
-    @classmethod
-    def load_test_data(cls, fname):
-        data = []
-        with open(fname) as f:
-            for line in f:
-                inp = line[:-1]  # the last character is a newline
-                data.append(inp)
-        return data
+class CustomTraining(MyModel):
+    @tf.function
+    def train_step(self, inputs):
+        inputs, labels = inputs
+        with tf.GradientTape() as tape:
+            predictions = self(inputs, training=True)
+            loss = self.loss(labels, predictions)
+        grads = tape.gradient(loss, model.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, model.trainable_variables))
+        return {'loss': loss}
 
-    def run_train(self, data, chars, data_size, vocab_size, char_to_ix, ix_to_char, Wxh, Whh, Why, bh, by):
-        n, p = 0, 0
-        mWxh, mWhh, mWhy = np.zeros_like(Wxh), np.zeros_like(Whh), np.zeros_like(Why)
-        mbh, mby = np.zeros_like(bh), np.zeros_like(by) # memory variables for Adagrad
-        smooth_loss = -np.log(1.0/vocab_size)*seq_length # loss at iteration 0
-        while n<=10000:
-            # prepare inputs (we're sweeping from left to right in steps seq_length long)
-            if p+seq_length+1 >= len(data) or n == 0:
-                hprev = np.zeros((hidden_size,1)) # reset RNN memory
-                p = 0 # go from start of data
-            inputs = [char_to_ix[ch] for ch in data[p:p+seq_length]]
-            targets = [char_to_ix[ch] for ch in data[p+1:p+seq_length+1]]
+class OneStep(tf.keras.Model):
+    def __init__(self, model, chars_from_ids, ids_from_chars, temperature=1.0):
+        super().__init__()
+        self.temperature=temperature
+        self.model = model
+        self.chars_from_ids = chars_from_ids
+        self.ids_from_chars = ids_from_chars
 
-            # forward seq_length characters through the net and fetch gradient
-            loss, dWxh, dWhh, dWhy, dbh, dby, hprev = self.lossFun(inputs, targets, vocab_size, Wxh, Whh, Why, bh, by, hprev)
-            smooth_loss = smooth_loss * 0.999 + loss * 0.001
+        # Create a mask to prevent "" or "[UNK]" from being generated.
+        skip_ids = self.ids_from_chars(['','[UNK]'])[:, None]
+        sparse_mask = tf.SparseTensor(
+            # Put a -inf at each bad index.
+            values=[-float('inf')]*len(skip_ids),
+            indices = skip_ids,
+            # Match the shape to the vocabulary
+            dense_shape=[len(ids_from_chars.get_vocabulary())])
+        self.prediction_mask = tf.sparse.to_dense(sparse_mask)
 
-            # perform parameter update with Adagrad
-            for param, dparam, mem in zip([Wxh, Whh, Why, bh, by], [dWxh, dWhh, dWhy, dbh, dby], [mWxh, mWhh, mWhy, mbh, mby]):
-                mem += dparam * dparam
-                param += -learning_rate * dparam / np.sqrt(mem + 1e-8) # adagrad update
+    @tf.function
+    def generate_one_step(self, inputs, states=None):
+        # Convert strings to token IDs.
+        input_chars = tf.strings.unicode_split(inputs, 'UTF-8')
+        input_ids = self.ids_from_chars(input_chars).to_tensor()
 
-            p += seq_length # move data pointer
-            n += 1 # iteration counter
+        # Run the model.
+        # predicted_logits.shape is [batch, char, next_char_logits]
+        predicted_logits, states =  self.model(inputs=input_ids, states=states,
+                                               return_state=True)
+        # Only use the last prediction.
+        predicted_logits = predicted_logits[:, -1, :]
+        predicted_logits = predicted_logits/self.temperature
+        # Apply the prediction mask: prevent "" or "[UNK]" from being generated.
+        predicted_logits = predicted_logits + self.prediction_mask
 
-        return hprev
+        # Sample the output logits to generate token IDs.
+        predicted_ids = tf.random.categorical(predicted_logits, num_samples=1)
+        predicted_ids = tf.squeeze(predicted_ids, axis=-1)
 
-    def lossFun(self, inputs, targets, vocab_size, Wxh, Whh, Why, bh, by, hprev):
-        """
-        inputs,targets are both list of integers.
-        hprev is Hx1 array of initial hidden state
-        returns the loss, gradients on model parameters, and last hidden state
-        """
-        xs, hs, ys, ps = {}, {}, {}, {}
-        hs[-1] = np.copy(hprev)
-        loss = 0
-        # forward pass
-        for t in range(len(inputs)):
-            xs[t] = np.zeros((vocab_size,1)) # encode in 1-of-k representation
-            xs[t][inputs[t]] = 1
-            hs[t] = np.tanh(np.dot(Wxh, xs[t]) + np.dot(Whh, hs[t-1]) + bh) # hidden state
-            ys[t] = np.dot(Why, hs[t]) + by # unnormalized log probabilities for next chars
-            ps[t] = np.exp(ys[t]) / np.sum(np.exp(ys[t])) # probabilities for next chars
-            loss += -np.log(ps[t][targets[t],0]) # softmax (cross-entropy loss)
-        # backward pass: compute gradients going backwards
-        dWxh, dWhh, dWhy = np.zeros_like(Wxh), np.zeros_like(Whh), np.zeros_like(Why)
-        dbh, dby = np.zeros_like(bh), np.zeros_like(by)
-        dhnext = np.zeros_like(hs[0])
-        for t in reversed(range(len(inputs))):
-            dy = np.copy(ps[t])
-            dy[targets[t]] -= 1 # backprop into y. see http://cs231n.github.io/neural-networks-case-study/#grad if confused here
-            dWhy += np.dot(dy, hs[t].T)
-            dby += dy
-            dh = np.dot(Why.T, dy) + dhnext # backprop into h
-            dhraw = (1 - hs[t] * hs[t]) * dh # backprop through tanh nonlinearity
-            dbh += dhraw
-            dWxh += np.dot(dhraw, xs[t].T)
-            dWhh += np.dot(dhraw, hs[t-1].T)
-            dhnext = np.dot(Whh.T, dhraw)
-        for dparam in [dWxh, dWhh, dWhy, dbh, dby]:
-            np.clip(dparam, -5, 5, out=dparam) # clip to mitigate exploding gradients
-        return loss, dWxh, dWhh, dWhy, dbh, dby, hs[len(inputs)-1]
+        # Convert from token ids to characters
+        predicted_chars = self.chars_from_ids(predicted_ids)
 
-    def sample(self, h, seed_ix, n):
-        """
-        sample a sequence of integers from the model
-        h is memory state, seed_ix is seed letter for first time step
-        """
-        x = np.zeros((vocab_size, 1))
-        x[seed_ix] = 1
-        ixes = []
-        for t in range(n):
-            h = np.tanh(np.dot(Wxh, x) + np.dot(Whh, h) + bh)
-            y = np.dot(Why, h) + by
-            p = np.exp(y) / np.sum(np.exp(y))
-            ix = np.random.choice(range(vocab_size), p=p.ravel())
-            x = np.zeros((vocab_size, 1))
-            x[ix] = 1
-            ixes.append(ix)
-        return ixes
+        # Return the characters and model state.
+        return predicted_chars, states
 
-    def sample_top3(self, h, seed_ix, vocab_size, Wxh, Whh, Why, bh, by):
-        """
-        output the top3 probable next letters
-        h is memory state, seed_ix is seed letter
-        """
-        x = np.zeros((vocab_size, 1))
-        x[seed_ix] = 1
-        ixes = []
-        h = np.tanh(np.dot(Wxh, x) + np.dot(Whh, h) + bh)
-        y = np.dot(Why, h) + by
-        p = np.exp(y) / np.sum(np.exp(y))
-        ixes = np.random.choice(range(vocab_size),3 , p=p.ravel())
-        return ixes
+def text_from_ids(ids):
+    return tf.strings.reduce_join(chars_from_ids(ids), axis=-1)
 
-    def save(self, work_dir, hprev, char_to_ix, ix_to_char, vocab_size, Wxh, Whh, Why, bh, by):
+def split_input_target(sequence):
+    input_text = sequence[:-1]
+    target_text = sequence[1:]
+    return input_text, target_text
 
-        with open(os.path.join(work_dir, 'model.checkpoint.hprev'), 'wt') as f:
-            for val in hprev:
-                f.write(str(val[0]) + "\n")
+def write_pred(preds, fname):
+    with open(fname, 'wt') as f:
+        for p in preds:
+            p = p.replace("\n", "")
+            print(p)
+            f.write('{}\n'.format(p))
 
-        with open(os.path.join(work_dir, 'model.checkpoint.vocab'), 'wt') as f:
-            for character in char_to_ix:
-                if character == "\n":
-                    f.write("<NEWLINE>\n")
-                else:
-                    f.write(character + "\n")
-            f.write(str(vocab_size) + "\n")
+def load_test_data(fname):
+    data = []
+    with open(fname) as f:
+        for line in f:
+            inp = line[:-1]  # the last character is a newline
+            data.append(inp)
+    return data
 
-        with open(os.path.join(work_dir, 'model.checkpoint.Wxh'), 'wt') as f:
-            for line in Wxh:
-                for val in line:
-                    f.write(str(val) + "#")
-                f.write("\n")
+def save(vocab, chars_from_ids, work_dir):
+    with open(os.path.join(work_dir, 'model.checkpoint.vocab'), 'wt') as f:
+        for val in vocab:
+            f.write(val + "\n")
+        f.write(len(vocab))
 
-        with open(os.path.join(work_dir, 'model.checkpoint.Whh'), 'wt') as f:
-            for line in Whh:
-                for val in line:
-                    f.write(str(val) + "#")
-                f.write("\n")
-        with open(os.path.join(work_dir, 'model.checkpoint.Why'), 'wt') as f:
-            for line in Why:
-                for val in line:
-                    f.write(str(val) + "#")
-                f.write("\n")
-        with open(os.path.join(work_dir, 'model.checkpoint.bh'), 'wt') as f:
-            for val in bh:
-                f.write(str(val[0]) + "\n")
-        with open(os.path.join(work_dir, 'model.checkpoint.by'), 'wt') as f:
-            for val in by:
-                f.write(str(val[0]) + "\n")
-
-    @classmethod
-    def write_pred(cls, preds, fname):
-        with open(fname, 'wt') as f:
-            for p in preds:
-                p = p.replace("\n", "")
-                print(p)
-                f.write('{}\n'.format(p))
-
-
-    def run_pred(self, data, hprev, char_to_ix, ix_to_char, vocab_size, Wxh, Whh, Why, bh, by):
-        # your code here
-        preds = []
-        for line in data:
-            line = line.split()
-            if len(line) < 1:
-                preds.append("")
-            else:
-                char = list(line[len(line)-1])
-                i = char[len(char)-1] #get last character of input line
-
-                if i in char_to_ix:
-                    sample_ix = self.sample_top3(hprev, char_to_ix[i], vocab_size, Wxh, Whh, Why, bh, by)
-                    txt = ''.join(ix_to_char[ix] for ix in sample_ix)
-                else:
-                    txt = "<unk>"
-                preds.append(txt)
-        return preds
-
-    @classmethod
-    def load(cls, work_dir):
-        with open(os.path.join(work_dir, 'model.checkpoint.hprev')) as f:
-            print("loading hprev")
-            values = []
-            for line in f:
-                values.append([line.split("\n")[0]])
-            hprev = np.array(values).astype(np.float)
-
-        with open(os.path.join(work_dir, 'model.checkpoint.vocab')) as f:
-            print("loading char_to_ix")
-            char_to_ix = {}
-            ix_to_char = {}
-            i = 0
-            f = list(f)
-            for line in f[:-1]:
-                if line == "<NEWLINE>\n":
-                    character = "\n"
-                else:
-                    character = line.split("\n")[0]
-                char_to_ix[character] = i
-                ix_to_char[i] = character
-                i += 1
-
-            vocab_size = int(f[-1].split("\n")[0])
-
-            print(vocab_size)
-
-        with open(os.path.join(work_dir, 'model.checkpoint.Wxh')) as f:
-            print("loading Wxh")
-            values = []
-            for line in f:
-                line = line.split("#")[:-1]
-                values.append(line)
-            Wxh = np.array(values).astype(np.float)
-
-        with open(os.path.join(work_dir, 'model.checkpoint.Whh')) as f:
-            print("loading Whh")
-            values = []
-            for line in f:
-                line = line.split("#")[:-1]
-                values.append(line)
-            Whh = np.array(values).astype(np.float)
-
-        with open(os.path.join(work_dir, 'model.checkpoint.Why')) as f:
-            print("loading Why")
-            values = []
-            for line in f:
-                line = line.split("#")[:-1]
-                values.append(line)
-            Why = np.array(values).astype(np.float)
-
-        with open(os.path.join(work_dir, 'model.checkpoint.bh')) as f:
-            print("loading bh")
-            values = []
-            for line in f:
-                values.append([line.split("\n")[0]])
-            bh = np.array(values).astype(np.float)
-
-        with open(os.path.join(work_dir, 'model.checkpoint.by')) as f:
-            print("loading by")
-            values = []
-            for line in f:
-                values.append([line.split("\n")[0]])
-            by = np.array(values).astype(np.float)
-
-        return hprev, char_to_ix, ix_to_char, vocab_size, Wxh, Whh, Why, bh, by
+def load(work_dir):
+    data = []
+    with open(os.path.join(work_dir, 'model.checkpoint.vocab')) as f:
+        f = list(line)
+        for line in f[:-1]:
+            line = line.split()  # the last character is a newline
+            data.append(line[0])
+        vocab_size = f[-1]
+    return data, vocab_size
 
 if __name__ == '__main__':
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
     parser.add_argument('mode', choices=('train', 'test'), help='what to run')
     parser.add_argument('--work_dir', help='where to save', default='work')
-    parser.add_argument('--train_data', help='path to train data', default='example/input.txt')
+    parser.add_argument('--train_data', help='path to train data', default='data/training.txt')
     parser.add_argument('--test_data', help='path to test data', default='example/input.txt')
     parser.add_argument('--test_output', help='path to write test predictions', default='pred.txt')
     args = parser.parse_args()
@@ -271,35 +138,157 @@ if __name__ == '__main__':
     random.seed(0)
 
     if args.mode == 'train':
+        start = time.time()
         if not os.path.isdir(args.work_dir):
             print('Making working directory {}'.format(args.work_dir))
             os.makedirs(args.work_dir)
 
-        print('Instatiating model')
-        model = MyModel()
+        path_to_file = args.train_data
 
-        print('Loading training data')
-        data, chars, data_size, vocab_size, char_to_ix, ix_to_char = MyModel.load_training_data(args.train_data)
+        # Read, then decode for py2 compat.
+        text = open(path_to_file, 'rb').read().decode(encoding='utf-8')
+        # length of text is the number of characters in it
+        print('Length of text: {} characters'.format(len(text)))
 
-        # hyperparameters
-        hidden_size = 512 # size of hidden layer of neurons
-        seq_length = 64 # number of steps to unroll the RNN for
-        learning_rate = 1e-1
+        # The unique characters in the file
+        vocab = sorted(set(text))
+        vocab.remove("\n")
+        vocab.remove(" ")
+        print('{} unique characters'.format(len(vocab)))
 
-        # model parameters
-        Wxh = np.random.randn(hidden_size, vocab_size)*0.01 # input to hidden
-        Whh = np.random.randn(hidden_size, hidden_size)*0.01 # hidden to hidden
-        Why = np.random.randn(vocab_size, hidden_size)*0.01 # hidden to output
-        bh = np.zeros((hidden_size, 1)) # hidden bias
-        by = np.zeros((vocab_size, 1)) # output bias
+        # Length of the vocabulary in chars
+        vocab_size = len(vocab)
 
-        print('Training')
-        hprev = model.run_train(data, chars, data_size, vocab_size, char_to_ix, ix_to_char, Wxh, Whh, Why, bh, by)
+        # The embedding dimension
+        embedding_dim = 256
 
-        print('Saving model')
-        model.save(args.work_dir, hprev, char_to_ix, ix_to_char, vocab_size, Wxh, Whh, Why, bh, by)
+        # Number of RNN units
+        rnn_units = 1024
 
+        example_texts = ['abcdefg', 'xyz']
+        chars = tf.strings.unicode_split(example_texts, input_encoding='UTF-8')
+
+        ids_from_chars = preprocessing.StringLookup(vocabulary=list(vocab))
+
+        ids = ids_from_chars(chars)
+
+        chars_from_ids = tf.keras.layers.experimental.preprocessing.StringLookup(
+            vocabulary=ids_from_chars.get_vocabulary(), invert=True)
+        chars = chars_from_ids(ids)
+        tf.strings.reduce_join(chars, axis=-1).numpy()
+
+        all_ids = ids_from_chars(tf.strings.unicode_split(text, 'UTF-8'))
+        ids_dataset = tf.data.Dataset.from_tensor_slices(all_ids)
+        # for ids in ids_dataset.take(10):
+        # 	print(chars_from_ids(ids).numpy().decode('utf-8'))
+
+        seq_length = 100
+        examples_per_epoch = len(text)//(seq_length+1)
+
+        sequences = ids_dataset.batch(seq_length+1, drop_remainder=True)
+
+        dataset = sequences.map(split_input_target)
+
+        # Batch size
+        BATCH_SIZE = 64
+
+        # Buffer size to shuffle the dataset
+        # (TF data is designed to work with possibly infinite sequences,
+        # so it doesn't attempt to shuffle the entire sequence in memory. Instead,
+        # it maintains a buffer in which it shuffles elements).
+        BUFFER_SIZE = 10000
+
+        dataset = (
+            dataset
+                .shuffle(BUFFER_SIZE)
+                .batch(BATCH_SIZE, drop_remainder=False)
+                .prefetch(tf.data.experimental.AUTOTUNE))
+
+        model = MyModel(
+            # Be sure the vocabulary size matches the `StringLookup` layers.
+            vocab_size=len(ids_from_chars.get_vocabulary()),
+            embedding_dim=embedding_dim,
+            rnn_units=rnn_units)
+
+        loss = tf.losses.SparseCategoricalCrossentropy(from_logits=True)
+        model.compile(optimizer='adam', loss=loss)
+
+        # Directory where the checkpoints will be saved
+        checkpoint_dir = './training_checkpoints'
+        # Name of the checkpoint files
+        checkpoint_prefix = os.path.join(checkpoint_dir, "ckpt_{epoch}")
+
+        checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
+            filepath=checkpoint_prefix,
+            save_weights_only=True)
+
+        EPOCHS = 1
+        history = model.fit(dataset, epochs=EPOCHS, callbacks=[checkpoint_callback])
+
+        save(vocab, chars_from_ids, args.work_dir)
+        '''
+        vocab:
+        vocab
+        vocab size
+        
+        dataset
+        epochs
+        chars_from_id
+        ids_from_chars
+        '''
+        end = time.time()
+        print(f"\nRun time: {end - start}")
     elif args.mode == 'test':
+        start = time.time()
+        # Create a basic model instance
+        vocab, vocab_size = load(args.work_dir)
+
+        ids_from_chars = preprocessing.StringLookup(vocabulary=list(vocab))
+        chars_from_ids = tf.keras.layers.experimental.preprocessing.StringLookup(
+            vocabulary=ids_from_chars.get_vocabulary(), invert=True)
+
+        # The embedding dimension
+        embedding_dim = 256
+
+        # Number of RNN units
+        rnn_units = 1024
+
+        model = MyModel(
+            # Be sure the vocabulary size matches the `StringLookup` layers.
+            vocab_size=len(ids_from_chars.get_vocabulary()),
+            embedding_dim=embedding_dim,
+            rnn_units=rnn_units)
+
+        loss = tf.losses.SparseCategoricalCrossentropy(from_logits=True)
+        model.compile(optimizer='adam', loss=loss)
+
+        checkpoint_path = "training_checkpoints"
+        model.load_weights(checkpoint_path)
+        one_step_model = OneStep(model, chars_from_ids, ids_from_chars)
+
+        test_data = load_test_data('example/input.txt')
+        pred = []
+        next_char = tf.constant(test_data)
+        #next_char = tf.constant(['on'])
+        result = []
+        second_result = []
+        third_result = []
+
+        first_char, states = one_step_model.generate_one_step(next_char, states=states)
+        second_choice, states = one_step_model.generate_one_step(next_char, states=states)
+        third_choice, states = one_step_model.generate_one_step(next_char, states=states)
+        print('1', first_char)
+        print('2', second_choice)
+        print('3', third_choice)
+        print('\n')
+        print(len(test_data))
+        for i in range(0, len(test_data)):
+            next_char_3 = first_char[i].numpy().decode('utf-8') + second_choice[i].numpy().decode('utf-8') + third_choice[i].numpy().decode('utf-8')
+            pred.append(next_char_3)
+        write_pred(pred, 'output.txt')
+        end = time.time()
+        print(f"\nRun time: {end - start}")
+        '''
         print('Loading model')
         model = MyModel()
         hprev, char_to_ix, ix_to_char, vocab_size, Wxh, Whh, Why, bh, by = MyModel.load(args.work_dir)
@@ -314,6 +303,8 @@ if __name__ == '__main__':
         assert len(pred) == len(test_data), 'Expected {} predictions but got {}'.format(len(test_data), len(pred))
         print(pred)
         model.write_pred(pred, args.test_output)
+        '''
+
 
     else:
         raise NotImplementedError('Unknown mode {}'.format(args.mode))
