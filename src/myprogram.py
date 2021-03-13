@@ -1,138 +1,421 @@
 #!/usr/bin/env python
 # coding: utf8
-import tensorflow as tf
-from tensorflow.keras.layers.experimental import preprocessing
 
-import numpy as np
-import random
 import os
-import time
-
+import string
+import random
+import numpy as np
+import pandas as pd
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
+import math
+import operator
 
-class MyModel(tf.keras.Model):
-    def __init__(self, vocab_size, embedding_dim, rnn_units):
-        super().__init__(self)
-        self.embedding = tf.keras.layers.Embedding(vocab_size, embedding_dim)
-        self.gru = tf.keras.layers.GRU(rnn_units,
-                                       return_sequences=True,
-                                       return_state=True)
-        self.dense = tf.keras.layers.Dense(vocab_size)
+def load_training():
+    data = pd.read_csv('data/xnli.dev.tsv', sep='\t', header=0)
+    sentences = set(list(data["sentence1"]))
+    sentences2 = set(list(data["sentence2"]))
+    sentences |= sentences2
 
-    def call(self, inputs, states=None, return_state=False, training=False):
-        x = inputs
-        x = self.embedding(x, training=training)
-        if states is None:
-            states = self.gru.get_initial_state(x)
-        x, states = self.gru(x, initial_state=states, training=training)
-        x = self.dense(x, training=training)
+    with open("data/training.txt", 'wt') as f:
+        for sentence in sentences:
+            f.write('{}\n'.format(sentence))
 
-        if return_state:
-            return x, states
-        else:
-            return x
+def create_test():
+    data = pd.read_csv('data/xnli.test.tsv', sep='\t', header=0)
+    sentences = set(list(data["sentence1"]))
 
-class CustomTraining(MyModel):
-    @tf.function
-    def train_step(self, inputs):
-        inputs, labels = inputs
-        with tf.GradientTape() as tape:
-            predictions = self(inputs, training=True)
-            loss = self.loss(labels, predictions)
-        grads = tape.gradient(loss, model.trainable_variables)
-        self.optimizer.apply_gradients(zip(grads, model.trainable_variables))
-        return {'loss': loss}
+    with open("data/test.txt", 'wt') as f:
+        for sentence in sentences:
+            f.write('{}\n'.format(sentence[:-2]))
 
-class OneStep(tf.keras.Model):
-    def __init__(self, model, chars_from_ids, ids_from_chars, temperature=1.0):
-        super().__init__()
-        self.temperature=temperature
-        self.model = model
-        self.chars_from_ids = chars_from_ids
-        self.ids_from_chars = ids_from_chars
+    with open("data/answer.txt", 'wt') as f:
+        for sentence in sentences:
+            f.write('{}\n'.format(sentence[-2]))
 
-        # Create a mask to prevent "" or "[UNK]" from being generated.
-        skip_ids = self.ids_from_chars(['','[UNK]'])[:, None]
-        sparse_mask = tf.SparseTensor(
-            # Put a -inf at each bad index.
-            values=[-float('inf')]*len(skip_ids),
-            indices = skip_ids,
-            # Match the shape to the vocabulary
-            dense_shape=[len(ids_from_chars.get_vocabulary())])
-        self.prediction_mask = tf.sparse.to_dense(sparse_mask)
+def get_tokens(sentences):
+    result = {}
+    result["<STOP>"] = 0
+    token_count = 0
+    for line in sentences:
+        tokens = list(line.replace("\n", "").replace('\xa0', ' ')) # split by character
 
-    @tf.function
-    def generate_one_step(self, inputs, states=None):
-        # Convert strings to token IDs.
-        input_chars = tf.strings.unicode_split(inputs, 'UTF-8')
-        input_ids = self.ids_from_chars(input_chars).to_tensor()
+        for token in tokens:
+            if token not in result:
+                result[token] = 1
+            else:
+                result[token] += 1
 
-        # Run the model.
-        # predicted_logits.shape is [batch, char, next_char_logits]
-        predicted_logits, states =  self.model(inputs=input_ids, states=states,
-                                               return_state=True)
-        # Only use the last prediction.
-        predicted_logits = predicted_logits[:, -1, :]
-        predicted_logits = predicted_logits/self.temperature
-        # Apply the prediction mask: prevent "" or "[UNK]" from being generated.
-        predicted_logits = predicted_logits + self.prediction_mask
+        token_count += len(tokens) + 1
+        result["<STOP>"] += 1
 
-        # Sample the output logits to generate token IDs.
-        predicted_ids = tf.random.categorical(predicted_logits, num_samples=1)
-        predicted_ids = tf.squeeze(predicted_ids, axis=-1)
+    # replace word with UNK if frequency is less than 3
+    keys = result.keys()
+    unk_tokens = []
+    result["UNK"] = 0
+    for key in keys:
+        if result[key] < 3:
+            result["UNK"] += result[key]
+            unk_tokens.append(key)
 
-        # Convert from token ids to characters
-        predicted_chars = self.chars_from_ids(predicted_ids)
+    for unk_token in unk_tokens:
+        del result[unk_token]
 
-        # Return the characters and model state.
-        return predicted_chars, states
+    return result, token_count
 
-def text_from_ids(ids):
-    return tf.strings.reduce_join(chars_from_ids(ids), axis=-1)
+def get_unigram_probabilities(tokens, token_count):
+    result = {}
+    keys = tokens.keys()
+    for key in keys:
+        result[key] = tokens[key] / token_count
+    return result
 
-def split_input_target(sequence):
-    input_text = sequence[:-1]
-    target_text = sequence[1:]
-    return input_text, target_text
+def get_unigram_perplexity(unigram_probabilities, file):
+    total = 0
+    token_count = 0
+    new_lines = 0
+    with open(file, 'r') as f:
+        for line in f:
+            tokens = list(line.replace("\n", ""))
+            for token in tokens:
+                if token in unigram_probabilities:
+                    total += math.log(unigram_probabilities[token], 2)
+                else:
+                    total += math.log(unigram_probabilities["UNK"], 2)
+            total += math.log(unigram_probabilities["<STOP>"], 2)
+            token_count += len(tokens) + 1
+
+    cross_entropy = -total / token_count
+    result = math.pow(2, cross_entropy)
+    return result
+
+def get_bigram_counts(training_tokens, file):
+    result = {}
+    with open(file, 'r') as f:
+        for line in f:
+            first = "<START>"
+            tokens = list(line.replace("\n", ""))
+            tokens.append("<STOP>")
+            for token in tokens:
+                if token not in training_tokens:
+                    second = "UNK"
+                else:
+                    second = token
+
+                if second not in result:
+                    result[second] = {}
+
+                bigrams = result[second]
+                if first not in bigrams:
+                    bigrams[first] = 1
+
+                else:
+                    bigrams[first] += 1
+                first = second
+
+    return result
+
+def get_bigram_probabilities(bigrams, training_tokens):
+    result = bigrams
+    keys = bigrams.keys()
+    for key in keys:
+        first_tokens = bigrams[key]
+        for first in first_tokens:
+            if first == "<START>":
+                count1 = training_tokens["<STOP>"]
+            else:
+                count1 = training_tokens[first]
+
+            p = first_tokens[first] / count1
+            result[key][first] = p
+
+    return result
+
+def get_bigram_perplexity(bigram_probability, training_tokens, file):
+    total = 0
+    token_count = 0
+    new_lines = 0
+    with open(file, 'r') as f:
+        for line in f:
+            sentence_probability = 0
+            first = "<START>"
+            tokens = list(line.replace("\n", ""))
+            tokens.append("<STOP>")
+            for token in tokens:
+                if token not in training_tokens:
+                    second = "UNK"
+                else:
+                    second = token
+
+                if second in bigram_probability:
+                    first_tokens = bigram_probability[second]
+
+                    # if word1 and word2 exist in V, p = count(bigram) / count(word1)
+                    if first in first_tokens:
+                        p = first_tokens[first]
+                        sentence_probability += math.log(p, 2)
+
+                    # bigram does not exist in training, p = 0
+                    else:
+                        sentence_probability -= math.inf
+
+                # bigram does not exist in training, p = 0
+                else:
+                    sentence_probability -= math.inf
+                first = second
+
+            token_count += len(tokens)
+            total += sentence_probability
+
+    result = math.pow(2, (-total / token_count))
+    return result
+
+def get_trigram_counts(training_tokens, file):
+    result = {}
+    token_count = 0
+    with open(file, 'r') as f:
+        for line in f:
+            first = "<START>"
+            second = "<START>"
+
+            tokens = list(line.replace("\n", ""))
+            tokens.append("<STOP>")
+            for token in tokens:
+                if token not in training_tokens:
+                    third = "UNK"
+                else:
+                    third = token
+
+                if third not in result:
+                    result[third] = {}
+                trigrams = result[third]
+                if second not in trigrams:
+                    result[third][second] = {}
+                bigrams = result[third][second]
+                if first not in bigrams:
+                    result[third][second][first] = 1
+                else:
+                    result[third][second][first] += 1
+
+                first = second
+                second = third
+    return result
+
+def get_trigram_probabilities(trigrams, bigrams, training_tokens):
+    result = trigrams
+    keys = trigrams.keys()
+
+    for key in keys:
+        second_tokens = trigrams[key]
+        for second in second_tokens:
+            first_tokens = second_tokens[second]
+            for first in first_tokens:
+                trigram_count = first_tokens[first]
+                if first == "<START>" and second == "<START>":
+                    bigram_count = training_tokens["<STOP>"]
+                else:
+                    bigram_count = bigrams[second][first]
+
+                result[key][second][first] = trigram_count / bigram_count
+    return result
+
+def get_trigram_perplexity(trigram_probabilities, training_tokens, file):
+    total = 0
+    token_count = 0
+
+    with open(file, 'r') as f:
+        for line in list(f):
+            sentence_probability = 0
+            first = "<START>"
+            second = "<START>"
+            tokens = list(line.replace("\n", ""))
+            tokens.append("<STOP>")
+
+            for token in tokens:
+                if token not in training_tokens:
+                    third = "UNK"
+                else:
+                    third = token
+
+                # if word1, word2 and word3 exist in V, p = count(trigram) / count(bigram)
+                if third in trigram_probabilities:
+                    second_tokens = trigram_probabilities[third]
+                    if second in second_tokens:
+                        first_tokens = second_tokens[second]
+                        if first in first_tokens:
+                            p = first_tokens[first]
+                            sentence_probability += math.log(p, 2)
+                        else:
+                            sentence_probability -= math.inf
+
+                    # trigram does not exist in training, p = 0
+                    else:
+                        sentence_probability -= math.inf
+
+                # trigram does not exist in training, p = 0
+                else:
+                    sentence_probability -= math.inf
+                first = second
+                second = third
+            token_count += len(tokens)
+            total += sentence_probability
+
+    result = math.pow(2, (-total / token_count))
+    return result
+
+def linear_interpolation(file, unigram, bigram, trigram, w1, w2, w3):
+    total = 0
+    token_count = 0
+    with open(file, 'r') as f:
+        for line in f:
+            first = "<START>"
+            second = "<START>"
+            tokens = list(line.replace("\n", ""))
+            tokens.append("<STOP>")
+
+            for token in tokens:
+                if token not in unigram:
+                    third = "UNK"
+                else:
+                    third = token
+
+                if third in trigram:
+                    p = w1 * unigram[third]
+                    second_tokens = trigram[third]
+
+                    if second in second_tokens:
+                        p += w2 * bigram[third][second]
+                        first_tokens = second_tokens[second]
+
+                        if first in first_tokens:
+                            p += w3 * trigram[third][second][first]
+
+                    total += math.log(p, 2)
+
+                first = second
+                second = third
+
+            token_count += len(tokens)
+
+    result = math.pow(2, (-total / token_count))
+    return result
+
+# abc d
+def predict(bigram_probabilities, unigram_probabilities, file, test = False):
+    with open(file, 'r') as f:
+        guesses = []
+        for line in f:
+            tokens = list(line.replace("\n", ""))
+
+            if test:
+                if len(tokens) < 2:
+                    guesses.append([])
+                else:
+                    prev = tokens[-2]
+                    top_3 =  get_top_3(bigram_probabilities, prev)
+                    guesses.append(top_3)
+            else:
+                if len(tokens) < 1:
+                    guesses.append([])
+                else:
+                    prev = tokens[-1]
+                    top_3 =  get_top_3(bigram_probabilities, unigram_probabilities, prev)
+                    guesses.append(top_3)
+    return guesses
+
+def get_top_3(bigram_probabilities, unigram_probabilities, prev):
+    # maps guesses to their probabilities
+    guesses = {}
+
+    keys = list(bigram_probabilities.keys())
+    keys.remove("<STOP>")
+    keys.remove("UNK")
+    #keys.remove(" ")
+    for key in keys:
+        prev_tokens = bigram_probabilities[key]
+        if prev in prev_tokens:
+            guesses[key] = prev_tokens[prev]
+
+
+    sorted_guesses = dict( sorted(guesses.items(), key=operator.itemgetter(1),reverse=True))
+    keys = list(sorted_guesses.keys())
+
+    # get top 3 guesses with highest freq
+    num_guesses = len(keys)
+    if num_guesses < 3:
+        sorted_guesses = dict( sorted(unigram_probabilities.items(), key=operator.itemgetter(1),reverse=True))
+        unigrams = list(sorted_guesses.keys())
+        unigrams.remove("<STOP>")
+        unigrams.remove("UNK")
+        # unigrams.remove(" ")
+
+    while num_guesses < 3:
+        keys = set(keys)
+        next_guess = unigrams.pop(0)
+        keys.add(next_guess)
+        num_guesses = len(keys)
+
+    return list(keys)[:3]
+
 
 def write_pred(preds, fname):
     with open(fname, 'wt') as f:
-        for p in preds:
+        for top_3 in preds:
+            p = ''.join(top_3)
             p = p.replace("\n", "")
-            print(p)
+            p = p.replace("<s>", " ")
             f.write('{}\n'.format(p))
 
-def load_test_data(fname):
-    data = []
-    with open(fname) as f:
-        for line in f:
-            inp = line[:-1]  # the last character is a newline
-            data.append(inp)
-    return data
-
-def save(vocab, chars_from_ids, work_dir):
-    with open(os.path.join(work_dir, 'model.checkpoint.vocab'), 'wt') as f:
-        for val in vocab:
-            f.write(val + "\n")
-        f.write(str(len(vocab)))
-
 def load(work_dir):
-    data = []
-    with open(os.path.join(work_dir, 'model.checkpoint.vocab')) as f:
-        f = list(f)
-        lines = list(f)
-        for line in f[:-1]:
-            data.append(line[0])
-        vocab_size = f[-1]
-        print(vocab_size)
-        print(len(data))
-    return data, vocab_size
+    with open(os.path.join(work_dir, 'model.checkpoint.unigrams'), encoding='utf-8') as f:
+        unigrams = {}
+        # f = list(f)[:-1]
+        for line in f:
+            line = line.split()
+            unigrams[line[0]] = float(line[1])
+
+    with open(os.path.join(work_dir, 'model.checkpoint.bigrams'), encoding='utf-8') as f:
+        bigrams = {}
+        # f = list(f)[:-1]
+        for line in f:
+            line = line.split()
+            second = line[0]
+            first = line[1]
+            p = float(line[2])
+            if second not in bigrams:
+                bigrams[second] = {}
+            bigrams[second][first] = p
+
+    return unigrams, bigrams
+
+def save(bigram_probabilities, unigram_probabilities, work_dir):
+    with open(os.path.join(work_dir, 'model.checkpoint.unigrams'), 'wt', encoding='utf-8') as f:
+        unigrams = list(unigram_probabilities)
+        for unigram in unigrams:
+            if unigram == " ":
+                f.write('{}\n'.format("<s> " + str(unigram_probabilities[unigram])))
+            else:
+                f.write('{}\n'.format(unigram + " " + str(unigram_probabilities[unigram])))
+
+    with open(os.path.join(work_dir, 'model.checkpoint.bigrams'), 'wt', encoding='utf-8') as f:
+        bigrams = list(bigram_probabilities)
+        for bigram in bigrams:
+            first_tokens = list(bigram_probabilities[bigram])
+            for token in first_tokens:
+                if bigram == " " and token == " ":
+                    f.write('{}\n'.format("<s> <s> " + str(bigram_probabilities[bigram][token])))
+                elif bigram == " ":
+                    f.write('{}\n'.format("<s> " + token + " " + str(bigram_probabilities[bigram][token])))
+                elif token == " ":
+                    f.write('{}\n'.format(bigram + " <s> " + str(bigram_probabilities[bigram][token])))
+                else:
+                    f.write('{}\n'.format(bigram + " " + token + " " + str(bigram_probabilities[bigram][token])))
+
 
 if __name__ == '__main__':
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
-    parser.add_argument('mode', choices=('train', 'test'), help='what to run')
+    parser.add_argument('mode', choices=('train', 'test', 'load_data'), help='what to run')
     parser.add_argument('--work_dir', help='where to save', default='work')
-    parser.add_argument('--train_data', help='path to train data', default='example/input.txt')
+    parser.add_argument('--train_data', help='path to train data', default='data/training.txt')
     parser.add_argument('--test_data', help='path to test data', default='example/input.txt')
     parser.add_argument('--test_output', help='path to write test predictions', default='pred.txt')
     args = parser.parse_args()
@@ -140,188 +423,35 @@ if __name__ == '__main__':
     random.seed(0)
 
     if args.mode == 'train':
-        start = time.time()
-        if not os.path.isdir(args.work_dir):
-            print('Making working directory {}'.format(args.work_dir))
-            os.makedirs(args.work_dir)
+        print('Instatiating model')
+        with open(args.train_data, 'r', encoding='utf-8') as f:
+            sentences = list(f)
 
-        path_to_file = args.train_data
+        tokens, token_count = get_tokens(sentences)
+        unigram_probabilities = get_unigram_probabilities(tokens, token_count)
+        bigram_counts = get_bigram_counts(tokens, args.train_data)
+        bigram_probabilities = get_bigram_probabilities(bigram_counts, tokens)
 
-        # Read, then decode for py2 compat.
-        text = open(path_to_file, 'rb').read().decode(encoding='utf-8')
-        # length of text is the number of characters in it
-        print('Length of text: {} characters'.format(len(text)))
+        print('Saving model')
+        save(bigram_probabilities, unigram_probabilities, args.work_dir)
 
-        # The unique characters in the file
-        vocab = sorted(set(text))
-        vocab.remove("\n")
-        # vocab.remove(" ")
-        print('{} unique characters'.format(len(vocab)))
+    elif args.mode == "load_data":
+        load_training()
+        create_test()
 
-        # Length of the vocabulary in chars
-        vocab_size = len(vocab)
-
-        # The embedding dimension
-        embedding_dim = 256
-
-        # Number of RNN units
-        rnn_units = 1024
-
-        example_texts = ['abcdefg', 'xyz']
-        chars = tf.strings.unicode_split(example_texts, input_encoding='UTF-8')
-
-        ids_from_chars = preprocessing.StringLookup(vocabulary=list(vocab))
-
-        ids = ids_from_chars(chars)
-
-        chars_from_ids = tf.keras.layers.experimental.preprocessing.StringLookup(
-            vocabulary=ids_from_chars.get_vocabulary(), invert=True)
-        chars = chars_from_ids(ids)
-        tf.strings.reduce_join(chars, axis=-1).numpy()
-
-        all_ids = ids_from_chars(tf.strings.unicode_split(text, 'UTF-8'))
-        ids_dataset = tf.data.Dataset.from_tensor_slices(all_ids)
-        # for ids in ids_dataset.take(10):
-        # 	print(chars_from_ids(ids).numpy().decode('utf-8'))
-
-        seq_length = 100
-        examples_per_epoch = len(text)//(seq_length+1)
-
-        sequences = ids_dataset.batch(seq_length+1, drop_remainder=True)
-
-        dataset = sequences.map(split_input_target)
-
-        # Batch size
-        BATCH_SIZE = 64
-
-        # Buffer size to shuffle the dataset
-        # (TF data is designed to work with possibly infinite sequences,
-        # so it doesn't attempt to shuffle the entire sequence in memory. Instead,
-        # it maintains a buffer in which it shuffles elements).
-        BUFFER_SIZE = 10000
-
-        dataset = (
-            dataset
-                .shuffle(BUFFER_SIZE)
-                .batch(BATCH_SIZE, drop_remainder=False)
-                .prefetch(tf.data.experimental.AUTOTUNE))
-
-        model = MyModel(
-            # Be sure the vocabulary size matches the `StringLookup` layers.
-            vocab_size=len(ids_from_chars.get_vocabulary()),
-            embedding_dim=embedding_dim,
-            rnn_units=rnn_units)
-
-        loss = tf.losses.SparseCategoricalCrossentropy(from_logits=True)
-        model.compile(optimizer='adam', loss=loss)
-
-        # Directory where the checkpoints will be saved
-        checkpoint_dir = './training_checkpoints'
-        # Name of the checkpoint files
-        checkpoint_prefix = os.path.join(checkpoint_dir, "ckpt_{epoch}")
-
-        checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
-            filepath=checkpoint_prefix,
-            save_weights_only=True)
-
-        EPOCHS = 35
-        history = model.fit(dataset, epochs=EPOCHS, callbacks=[checkpoint_callback])
-
-        save(vocab, chars_from_ids, args.work_dir)
-
-        # Save the weights
-        model.save_weights(checkpoint_dir)
-
-
-        '''
-        vocab:
-        vocab
-        vocab size
-        
-        dataset
-        epochs
-        chars_from_id
-        ids_from_chars
-        '''
-        end = time.time()
-        print(f"\nRun time: {end - start}")
     elif args.mode == 'test':
-        start = time.time()
-        # Create a basic model instance
-        vocab, vocab_size = load(args.work_dir)
-
-        ids_from_chars = preprocessing.StringLookup(vocabulary=list(vocab))
-        chars_from_ids = tf.keras.layers.experimental.preprocessing.StringLookup(
-            vocabulary=ids_from_chars.get_vocabulary(), invert=True)
-
-        # The embedding dimension
-        embedding_dim = 256
-
-        # Number of RNN units
-        rnn_units = 1024
-
-        model = MyModel(
-            # Be sure the vocabulary size matches the `StringLookup` layers.
-            vocab_size=len(ids_from_chars.get_vocabulary()),
-            embedding_dim=embedding_dim,
-            rnn_units=rnn_units)
-
-        loss = tf.losses.SparseCategoricalCrossentropy(from_logits=True)
-        model.compile(optimizer='adam', loss=loss)
-        model.built = True
-
-        checkpoint_path = "./training_checkpoints"
-        model.load_weights(checkpoint_path)
-        one_step_model = OneStep(model, chars_from_ids, ids_from_chars)
-
-        start = time.time()
-        states = None
-        test_data = load_test_data('example/input.txt')
-        pred = []
-        next_char = tf.constant(test_data)
-        #next_char = tf.constant(['on'])
-        result = []
-        second_result = []
-        third_result = []
-
-        first_char, states = one_step_model.generate_one_step(next_char, states=states)
-        second_choice, states = one_step_model.generate_one_step(next_char, states=states)
-        third_choice, states = one_step_model.generate_one_step(next_char, states=states)
-        print('1', first_char)
-        print('2', second_choice)
-        print('3', third_choice)
-        print('\n')
-        print(len(test_data))
-        for i in range(0, len(test_data)):
-            next_char_3 = first_char[i].numpy().decode('utf-8') + second_choice[i].numpy().decode('utf-8') + third_choice[i].numpy().decode('utf-8')
-            pred.append(next_char_3)
-
-        end = time.time()
-
-        # print(result[0].numpy().decode('utf-8'), '\n\n' + '_'*80)
-        # print(second_result[0].numpy().decode('utf-8'), '\n\n' + '_'*80)
-        # print(third_result[0].numpy().decode('utf-8'), '\n\n' + '_'*80)
-
-        print(f"\nRun time: {end - start}")
-        write_pred(pred, 'output.txt')
-
-        '''
         print('Loading model')
-        model = MyModel()
-        hprev, char_to_ix, ix_to_char, vocab_size, Wxh, Whh, Why, bh, by = MyModel.load(args.work_dir)
+        unigrams, bigrams = load(args.work_dir)
 
         print('Loading test data from {}'.format(args.test_data))
-        test_data = MyModel.load_test_data(args.test_data)
-
         print('Making predictions')
-        pred = model.run_pred(test_data, hprev, char_to_ix, ix_to_char, vocab_size, Wxh, Whh, Why, bh, by)
+        preds = predict(bigrams, unigrams, args.test_data)
 
         print('Writing predictions to {}'.format(args.test_output))
-        assert len(pred) == len(test_data), 'Expected {} predictions but got {}'.format(len(test_data), len(pred))
-        print(pred)
-        model.write_pred(pred, args.test_output)
-        '''
-
+        with open(args.test_data, 'r') as f:
+            size = len(list(f))
+        assert len(preds) == size, 'Expected {} predictions but got {}'.format(size, len(preds))
+        write_pred(preds, args.test_output)
 
     else:
         raise NotImplementedError('Unknown mode {}'.format(args.mode))
